@@ -141,6 +141,7 @@ class UI:
     def read_key(cls) -> str:
         """Read a single key from stdin, handling escape sequences."""
         import os
+
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         try:
