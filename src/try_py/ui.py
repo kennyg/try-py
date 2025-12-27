@@ -140,21 +140,21 @@ class UI:
     @classmethod
     def read_key(cls) -> str:
         """Read a single key from stdin, handling escape sequences."""
+        import os
         fd = sys.stdin.fileno()
         old_settings = termios.tcgetattr(fd)
         try:
             tty.setraw(fd)
-            ch = sys.stdin.read(1)
+            ch = os.read(fd, 1).decode("utf-8", errors="replace")
             if ch == "\033":  # Escape sequence
-                import select
-
-                # Check for more chars
-                if select.select([sys.stdin], [], [], 0.05)[0]:
-                    ch += sys.stdin.read(1)
-                    if select.select([sys.stdin], [], [], 0.01)[0]:
-                        ch += sys.stdin.read(1)
-                    if select.select([sys.stdin], [], [], 0.01)[0]:
-                        ch += sys.stdin.read(2)
+                # Set timeout for reading rest of sequence
+                new_settings = termios.tcgetattr(fd)
+                new_settings[6][termios.VMIN] = 0
+                new_settings[6][termios.VTIME] = 1  # 0.1s timeout
+                termios.tcsetattr(fd, termios.TCSANOW, new_settings)
+                # Read remaining chars of escape sequence
+                rest = os.read(fd, 5).decode("utf-8", errors="replace")
+                ch += rest
             return ch
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)

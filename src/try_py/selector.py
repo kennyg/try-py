@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import fcntl
+import os
 import re
 import select
 import signal
@@ -11,8 +13,7 @@ import tty
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from types import FrameType
-from typing import Any, Callable, TypedDict
+from typing import Any, TypedDict
 
 from .fuzzy import calculate_score, highlight_matches_for_selection
 from .ui import UI
@@ -82,6 +83,7 @@ class TrySelector:
     test_had_keys: bool = field(default=False, init=False)
     _old_winch_handler: Any = field(default=None, init=False)
     needs_redraw: bool = field(default=False, init=False)
+    _original_term_settings: Any = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self.search_term = re.sub(r"\s+", "-", self.search_term)
@@ -113,6 +115,7 @@ class TrySelector:
             else:
                 fd = sys.stdin.fileno()
                 old_settings = termios.tcgetattr(fd)
+                self._original_term_settings = old_settings
                 try:
                     tty.setraw(fd)
                     self._main_loop()
@@ -333,17 +336,29 @@ class TrySelector:
                 UI.cls()
                 return None
 
-            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+            fd = sys.stdin.fileno()
+            ready, _, _ = select.select([fd], [], [], 0.1)
             if ready:
-                # Read directly - we're already in raw mode from run()
-                ch = sys.stdin.read(1)
-                if ch == "\033":  # Escape sequence
-                    if select.select([sys.stdin], [], [], 0.05)[0]:
-                        ch += sys.stdin.read(1)
-                        if select.select([sys.stdin], [], [], 0.01)[0]:
-                            ch += sys.stdin.read(1)
-                        if select.select([sys.stdin], [], [], 0.01)[0]:
-                            ch += sys.stdin.read(2)
+                # Read first byte directly (we're already in raw mode)
+                data = os.read(fd, 1)
+                if not data:
+                    continue
+                ch = data.decode("utf-8", errors="replace")
+
+                # If escape, read more bytes for arrow keys etc
+                if ch == "\033":
+                    # Check for more bytes with short timeout
+                    while True:
+                        more_ready, _, _ = select.select([fd], [], [], 0.05)
+                        if more_ready:
+                            more = os.read(fd, 1)
+                            if more:
+                                ch += more.decode("utf-8", errors="replace")
+                            else:
+                                break
+                        else:
+                            break
+
                 return ch
 
     def _render(self, tries: list[dict]) -> None:
@@ -574,13 +589,16 @@ class TrySelector:
             confirmation = self.test_confirm or ""
         else:
             fd = sys.stdin.fileno()
-            old = termios.tcgetattr(fd)
             try:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+                # Restore cooked mode for input()
+                if self._original_term_settings:
+                    termios.tcsetattr(fd, termios.TCSADRAIN, self._original_term_settings)
                 sys.stdin.flush()
                 confirmation = input().strip()
             finally:
-                pass
+                # Restore raw mode
+                if self._original_term_settings:
+                    tty.setraw(fd)
 
         if confirmation == "YES":
             try:
