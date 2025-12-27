@@ -9,7 +9,7 @@ import sys
 import termios
 import tty
 from contextlib import contextmanager
-from typing import TextIO
+from typing import ClassVar, TextIO
 
 # Token to ANSI code mapping
 TOKEN_MAP = {
@@ -44,13 +44,13 @@ TOKEN_MAP = {
 class UI:
     """Double-buffered terminal UI with token-based formatting."""
 
-    _buffer: list[str] = []
-    _last_buffer: list[str] = []
-    _current_line: str = ""
-    _height: int | None = None
-    _width: int | None = None
-    _expand_tokens: bool = True
-    _force_colors: bool = False
+    _buffer: ClassVar[list[str]] = []
+    _last_buffer: ClassVar[list[str]] = []
+    _current_line: ClassVar[str] = ""
+    _height: ClassVar[int | None] = None
+    _width: ClassVar[int | None] = None
+    _expand_tokens: ClassVar[bool] = True
+    _force_colors: ClassVar[bool] = False
 
     @classmethod
     def print(cls, text: str, io: TextIO = sys.stderr) -> None:

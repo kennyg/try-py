@@ -5,14 +5,11 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .selector import TryDir
+from typing import Any
 
 
 def calculate_score(
-    try_dir: TryDir,
+    try_dir: dict[str, Any],
     query_down: str,
     query_chars: list[str],
     ctime: datetime | None = None,
@@ -29,8 +26,8 @@ def calculate_score(
     - Length penalty: 10.0 / (text_len + 10.0)
     - Recency bonus: 3.0/sqrt(hours+1) based on mtime
     """
-    text = try_dir["basename"]
-    text_lower = try_dir["basename_down"]
+    text: str = try_dir["basename"]
+    text_lower: str = try_dir["basename_down"]
 
     score = 0.0
 

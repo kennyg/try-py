@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 from .ui import UI
-
-if TYPE_CHECKING:
-    pass
 
 SCRIPT_WARNING = "# if you can read this, you didn't launch try from an alias. run try --help."
 
@@ -41,7 +38,7 @@ def script_cd(path: str) -> list[str]:
 
 def script_mkdir_cd(path: str) -> list[str]:
     """Generate commands to mkdir and cd."""
-    return [f"mkdir -p {q(path)}"] + script_cd(path)
+    return [f"mkdir -p {q(path)}", *script_cd(path)]
 
 
 def script_clone(path: str, uri: str) -> list[str]:
@@ -51,7 +48,8 @@ def script_clone(path: str, uri: str) -> list[str]:
         f"mkdir -p {q(path)}",
         f"echo {q(msg)}",
         f"git clone '{uri}' {q(path)}",
-    ] + script_cd(path)
+        *script_cd(path),
+    ]
 
 
 def script_worktree(path: str, repo: str | None = None) -> list[str]:
@@ -60,20 +58,20 @@ def script_worktree(path: str, repo: str | None = None) -> list[str]:
         r = q(repo)
         worktree_cmd = (
             f"/usr/bin/env sh -c 'if git -C {r} rev-parse --is-inside-work-tree >/dev/null 2>&1; "
-            f'then repo=$(git -C {r} rev-parse --show-toplevel); '
+            f"then repo=$(git -C {r} rev-parse --show-toplevel); "
             f'git -C "$repo" worktree add --detach {q(path)} >/dev/null 2>&1 || true; fi; exit 0\''
         )
         src = repo
     else:
         worktree_cmd = (
             "/usr/bin/env sh -c 'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; "
-            f'then repo=$(git rev-parse --show-toplevel); '
+            f"then repo=$(git rev-parse --show-toplevel); "
             f'git -C "$repo" worktree add --detach {q(path)} >/dev/null 2>&1 || true; fi; exit 0\''
         )
-        src = os.getcwd()
+        src = str(Path.cwd())
 
     msg = UI.expand_tokens(f"Using {{b}}git worktree{{/b}} to create this trial from {src}.")
-    return [f"mkdir -p {q(path)}", f"echo {q(msg)}", worktree_cmd] + script_cd(path)
+    return [f"mkdir -p {q(path)}", f"echo {q(msg)}", worktree_cmd, *script_cd(path)]
 
 
 def script_delete(paths: list[dict], base_path: str) -> list[str]:
@@ -82,7 +80,7 @@ def script_delete(paths: list[dict], base_path: str) -> list[str]:
     for item in paths:
         basename = item["basename"]
         cmds.append(f"[[ -d {q(basename)} ]] && rm -rf {q(basename)}")
-    cmds.append(f'( cd {q(os.getcwd())} 2>/dev/null || cd "$HOME" )')
+    cmds.append(f'( cd {q(str(Path.cwd()))} 2>/dev/null || cd "$HOME" )')
     return cmds
 
 
@@ -94,14 +92,12 @@ def is_fish() -> bool:
 
 def generate_init_script(script_path: str, tries_path: str) -> str:
     """Generate shell initialization script."""
-    import os
-
     path_arg = f" --path '{tries_path}'" if tries_path else ""
 
     # Get the directory containing the script (the venv bin dir)
-    script_dir = os.path.dirname(script_path)
+    script_dir = Path(script_path).parent
     # Use uv run from the project directory, or fall back to direct venv python
-    venv_python = os.path.join(script_dir, "python")
+    venv_python = script_dir / "python"
 
     if is_fish():
         return f"""function try

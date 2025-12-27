@@ -2,9 +2,15 @@
 
 Ephemeral workspace manager - organize your experimental projects.
 
-Python port of [try](https://github.com/your-repo/try).
+Python port of [try](https://github.com/tobi/try).
 
 ## Installation
+
+```bash
+uv tool install git+https://github.com/kennyg/try-py
+```
+
+For local development:
 
 ```bash
 uv pip install -e .

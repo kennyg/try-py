@@ -2,32 +2,48 @@
 
 from __future__ import annotations
 
-import os
 import re
 import select
 import signal
 import sys
 import termios
 import tty
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TypedDict
+from types import FrameType
+from typing import Any, Callable, TypedDict
 
 from .fuzzy import calculate_score, highlight_matches_for_selection
 from .ui import UI
 
 
-class TryDir(TypedDict):
-    """Directory entry type."""
+@dataclass
+class TryDir:
+    """Directory entry."""
 
     name: str
     basename: str
-    basename_down: str
-    path: str
-    is_new: bool
+    path: Path
     ctime: datetime
     mtime: datetime
-    score: float
+    score: float = 0.0
+
+    @property
+    def basename_down(self) -> str:
+        return self.basename.lower()
+
+    def to_dict(self) -> dict:
+        """Convert to dict for scoring compatibility."""
+        return {
+            "name": self.name,
+            "basename": self.basename,
+            "basename_down": self.basename_down,
+            "path": str(self.path),
+            "ctime": self.ctime,
+            "mtime": self.mtime,
+            "score": self.score,
+        }
 
 
 class SelectionResult(TypedDict, total=False):
@@ -39,44 +55,41 @@ class SelectionResult(TypedDict, total=False):
     base_path: str
 
 
+@dataclass
 class TrySelector:
     """Interactive directory selector with fuzzy matching."""
 
-    TRY_PATH = os.environ.get("TRY_PATH", os.path.expanduser("~/src/tries"))
+    TRY_PATH = str(Path("~/src/tries").expanduser())
 
-    def __init__(
-        self,
-        search_term: str = "",
-        base_path: str | None = None,
-        initial_input: str | None = None,
-        test_render_once: bool = False,
-        test_no_cls: bool = False,
-        test_keys: list[str] | None = None,
-        test_confirm: str | None = None,
-    ):
-        self.search_term = re.sub(r"\s+", "-", search_term)
-        self.cursor_pos = 0
-        self.input_cursor_pos = 0
-        self.scroll_offset = 0
+    search_term: str = ""
+    base_path: str = field(default_factory=lambda: TrySelector.TRY_PATH)
+    initial_input: str | None = None
+    test_render_once: bool = False
+    test_no_cls: bool = False
+    test_keys: list[str] | None = None
+    test_confirm: str | None = None
+
+    # Internal state
+    cursor_pos: int = field(default=0, init=False)
+    input_cursor_pos: int = field(default=0, init=False)
+    scroll_offset: int = field(default=0, init=False)
+    input_buffer: str = field(default="", init=False)
+    selected: SelectionResult | None = field(default=None, init=False)
+    _all_tries: list[TryDir] | None = field(default=None, init=False)
+    delete_status: str | None = field(default=None, init=False)
+    delete_mode: bool = field(default=False, init=False)
+    marked_for_deletion: list[str] = field(default_factory=list, init=False)
+    test_had_keys: bool = field(default=False, init=False)
+    _old_winch_handler: Any = field(default=None, init=False)
+    needs_redraw: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        self.search_term = re.sub(r"\s+", "-", self.search_term)
         self.input_buffer = (
-            re.sub(r"\s+", "-", initial_input)
-            if initial_input
-            else self.search_term
+            re.sub(r"\s+", "-", self.initial_input) if self.initial_input else self.search_term
         )
         self.input_cursor_pos = len(self.input_buffer)
-        self.selected: SelectionResult | None = None
-        self._all_tries: list[TryDir] | None = None
-        self.base_path = base_path or self.TRY_PATH
-        self.delete_status: str | None = None
-        self.delete_mode = False
-        self.marked_for_deletion: list[str] = []
-        self.test_render_once = test_render_once
-        self.test_no_cls = test_no_cls
-        self.test_keys = test_keys
-        self.test_had_keys = test_keys is not None and len(test_keys) > 0
-        self.test_confirm = test_confirm
-        self._old_winch_handler = None
-        self.needs_redraw = False
+        self.test_had_keys = self.test_keys is not None and len(self.test_keys) > 0
 
         Path(self.base_path).mkdir(parents=True, exist_ok=True)
 
@@ -86,9 +99,7 @@ class TrySelector:
 
         try:
             # Test mode: render once and exit
-            if self.test_render_once and (
-                self.test_keys is None or len(self.test_keys) == 0
-            ):
+            if self.test_render_once and (self.test_keys is None or len(self.test_keys) == 0):
                 tries = self._get_tries()
                 self._render(tries)
                 return None
@@ -119,7 +130,7 @@ class TrySelector:
             UI.hide_cursor()
 
         # Handle SIGWINCH
-        def handle_winch(signum, frame):
+        def handle_winch(signum: int, frame: object) -> None:
             self.needs_redraw = True
 
         self._old_winch_handler = signal.signal(signal.SIGWINCH, handle_winch)
@@ -139,24 +150,23 @@ class TrySelector:
             return self._all_tries
 
         tries: list[TryDir] = []
+        base = Path(self.base_path)
+
         try:
-            for entry in os.listdir(self.base_path):
-                if entry.startswith("."):
+            for entry in base.iterdir():
+                if entry.name.startswith("."):
                     continue
 
-                path = os.path.join(self.base_path, entry)
                 try:
-                    stat = os.stat(path)
-                    if not os.path.isdir(path):
+                    if not entry.is_dir():
                         continue
 
+                    stat = entry.stat()
                     tries.append(
                         TryDir(
-                            name=f"📁 {entry}",
-                            basename=entry,
-                            basename_down=entry.lower(),
-                            path=path,
-                            is_new=False,
+                            name=f"📁 {entry.name}",
+                            basename=entry.name,
+                            path=entry,
                             ctime=datetime.fromtimestamp(stat.st_ctime),
                             mtime=datetime.fromtimestamp(stat.st_mtime),
                             score=0.0,
@@ -170,7 +180,7 @@ class TrySelector:
         self._all_tries = tries
         return tries
 
-    def _get_tries(self) -> list[TryDir]:
+    def _get_tries(self) -> list[dict]:
         """Get filtered and scored directories."""
         all_tries = self._load_all_tries()
 
@@ -180,12 +190,10 @@ class TrySelector:
         # Score all tries
         scored = []
         for try_dir in all_tries:
-            score = calculate_score(
-                try_dir, query_down, query_chars, try_dir["ctime"], try_dir["mtime"]
-            )
-            scored_dir = dict(try_dir)
-            scored_dir["score"] = score
-            scored.append(scored_dir)
+            d = try_dir.to_dict()
+            score = calculate_score(d, query_down, query_chars, try_dir.ctime, try_dir.mtime)
+            d["score"] = score
+            scored.append(d)
 
         # Filter and sort
         if not self.input_buffer:
@@ -210,107 +218,105 @@ class TrySelector:
             if key is None:
                 continue
 
-            if key == "\r":  # Enter
-                if self.delete_mode and self.marked_for_deletion:
-                    self._confirm_batch_delete(tries)
-                    if self.selected:
-                        break
-                elif self.cursor_pos < len(tries):
-                    self._handle_selection(tries[self.cursor_pos])
-                    if self.selected:
-                        break
-                elif show_create_new:
-                    self._handle_create_new()
-                    if self.selected:
-                        break
+            match key:
+                case "\r":  # Enter
+                    if self.delete_mode and self.marked_for_deletion:
+                        self._confirm_batch_delete(tries)
+                        if self.selected:
+                            break
+                    elif self.cursor_pos < len(tries):
+                        self._handle_selection(tries[self.cursor_pos])
+                        if self.selected:
+                            break
+                    elif show_create_new:
+                        self._handle_create_new()
+                        if self.selected:
+                            break
 
-            elif key in ("\033[A", "\x10"):  # Up / Ctrl-P
-                self.cursor_pos = max(0, self.cursor_pos - 1)
+                case "\033[A" | "\x10":  # Up / Ctrl-P
+                    self.cursor_pos = max(0, self.cursor_pos - 1)
 
-            elif key in ("\033[B", "\x0e"):  # Down / Ctrl-N
-                self.cursor_pos = min(total_items - 1, self.cursor_pos + 1)
+                case "\033[B" | "\x0e":  # Down / Ctrl-N
+                    self.cursor_pos = min(total_items - 1, self.cursor_pos + 1)
 
-            elif key in ("\033[C", "\033[D"):  # Right/Left arrows - ignore
-                pass
+                case "\033[C" | "\033[D":  # Right/Left arrows - ignore
+                    pass
 
-            elif key in ("\x7f", "\b"):  # Backspace
-                if self.input_cursor_pos > 0:
-                    self.input_buffer = (
-                        self.input_buffer[: self.input_cursor_pos - 1]
-                        + self.input_buffer[self.input_cursor_pos :]
-                    )
-                    self.input_cursor_pos -= 1
-                self.cursor_pos = 0
+                case "\x7f" | "\b":  # Backspace
+                    if self.input_cursor_pos > 0:
+                        self.input_buffer = (
+                            self.input_buffer[: self.input_cursor_pos - 1]
+                            + self.input_buffer[self.input_cursor_pos :]
+                        )
+                        self.input_cursor_pos -= 1
+                    self.cursor_pos = 0
 
-            elif key == "\x01":  # Ctrl-A
-                self.input_cursor_pos = 0
+                case "\x01":  # Ctrl-A
+                    self.input_cursor_pos = 0
 
-            elif key == "\x05":  # Ctrl-E
-                self.input_cursor_pos = len(self.input_buffer)
+                case "\x05":  # Ctrl-E
+                    self.input_cursor_pos = len(self.input_buffer)
 
-            elif key == "\x02":  # Ctrl-B
-                self.input_cursor_pos = max(0, self.input_cursor_pos - 1)
+                case "\x02":  # Ctrl-B
+                    self.input_cursor_pos = max(0, self.input_cursor_pos - 1)
 
-            elif key == "\x06":  # Ctrl-F
-                self.input_cursor_pos = min(
-                    len(self.input_buffer), self.input_cursor_pos + 1
-                )
+                case "\x06":  # Ctrl-F
+                    self.input_cursor_pos = min(len(self.input_buffer), self.input_cursor_pos + 1)
 
-            elif key == "\x08":  # Ctrl-H
-                if self.input_cursor_pos > 0:
-                    self.input_buffer = (
-                        self.input_buffer[: self.input_cursor_pos - 1]
-                        + self.input_buffer[self.input_cursor_pos :]
-                    )
-                    self.input_cursor_pos -= 1
-                self.cursor_pos = 0
+                case "\x08":  # Ctrl-H
+                    if self.input_cursor_pos > 0:
+                        self.input_buffer = (
+                            self.input_buffer[: self.input_cursor_pos - 1]
+                            + self.input_buffer[self.input_cursor_pos :]
+                        )
+                        self.input_cursor_pos -= 1
+                    self.cursor_pos = 0
 
-            elif key == "\x0b":  # Ctrl-K
-                self.input_buffer = self.input_buffer[: self.input_cursor_pos]
+                case "\x0b":  # Ctrl-K
+                    self.input_buffer = self.input_buffer[: self.input_cursor_pos]
 
-            elif key == "\x17":  # Ctrl-W
-                if self.input_cursor_pos > 0:
-                    pos = self.input_cursor_pos - 1
-                    # Skip non-alnum
-                    while pos >= 0 and not self.input_buffer[pos].isalnum():
-                        pos -= 1
-                    # Skip alnum
-                    while pos >= 0 and self.input_buffer[pos].isalnum():
-                        pos -= 1
-                    new_pos = pos + 1
-                    self.input_buffer = (
-                        self.input_buffer[:new_pos]
-                        + self.input_buffer[self.input_cursor_pos :]
-                    )
-                    self.input_cursor_pos = new_pos
+                case "\x17":  # Ctrl-W
+                    if self.input_cursor_pos > 0:
+                        pos = self.input_cursor_pos - 1
+                        # Skip non-alnum
+                        while pos >= 0 and not self.input_buffer[pos].isalnum():
+                            pos -= 1
+                        # Skip alnum
+                        while pos >= 0 and self.input_buffer[pos].isalnum():
+                            pos -= 1
+                        new_pos = pos + 1
+                        self.input_buffer = (
+                            self.input_buffer[:new_pos] + self.input_buffer[self.input_cursor_pos :]
+                        )
+                        self.input_cursor_pos = new_pos
 
-            elif key == "\x04":  # Ctrl-D - toggle delete mark
-                if self.cursor_pos < len(tries):
-                    path = tries[self.cursor_pos]["path"]
-                    if path in self.marked_for_deletion:
-                        self.marked_for_deletion.remove(path)
-                    else:
-                        self.marked_for_deletion.append(path)
-                        self.delete_mode = True
-                    if not self.marked_for_deletion:
+                case "\x04":  # Ctrl-D - toggle delete mark
+                    if self.cursor_pos < len(tries):
+                        path = tries[self.cursor_pos]["path"]
+                        if path in self.marked_for_deletion:
+                            self.marked_for_deletion.remove(path)
+                        else:
+                            self.marked_for_deletion.append(path)
+                            self.delete_mode = True
+                        if not self.marked_for_deletion:
+                            self.delete_mode = False
+
+                case "\x03" | "\033":  # Ctrl-C / ESC
+                    if self.delete_mode:
+                        self.marked_for_deletion.clear()
                         self.delete_mode = False
+                    else:
+                        self.selected = None
+                        break
 
-            elif key in ("\x03", "\033"):  # Ctrl-C / ESC
-                if self.delete_mode:
-                    self.marked_for_deletion.clear()
-                    self.delete_mode = False
-                else:
-                    self.selected = None
-                    break
-
-            elif len(key) == 1 and re.match(r"[a-zA-Z0-9\-_. ]", key):
-                self.input_buffer = (
-                    self.input_buffer[: self.input_cursor_pos]
-                    + key
-                    + self.input_buffer[self.input_cursor_pos :]
-                )
-                self.input_cursor_pos += 1
-                self.cursor_pos = 0
+                case char if len(char) == 1 and re.match(r"[a-zA-Z0-9\-_. ]", char):
+                    self.input_buffer = (
+                        self.input_buffer[: self.input_cursor_pos]
+                        + char
+                        + self.input_buffer[self.input_cursor_pos :]
+                    )
+                    self.input_cursor_pos += 1
+                    self.cursor_pos = 0
 
     def _read_key(self) -> str | None:
         """Read a key from input."""
@@ -331,7 +337,7 @@ class TrySelector:
             if ready:
                 return UI.read_key()
 
-    def _render(self, tries: list[TryDir]) -> None:
+    def _render(self, tries: list[dict]) -> None:
         """Render the TUI."""
         term_width = UI.width()
         term_height = UI.height()
@@ -399,8 +405,7 @@ class TrySelector:
                     UI.print("{section}")
 
                 # Format with date styling
-                date_match = re.match(r"^(\d{4}-\d{2}-\d{2})-(.+)$", basename)
-                if date_match:
+                if date_match := re.match(r"^(\d{4}-\d{2}-\d{2})-(.+)$", basename):
                     date_part, name_part = date_match.groups()
                     full_name = f"{date_part}-{name_part}"
 
@@ -432,9 +437,7 @@ class TrySelector:
 
                     if self.input_buffer:
                         UI.print(
-                            highlight_matches_for_selection(
-                                name, self.input_buffer, is_selected
-                            )
+                            highlight_matches_for_selection(name, self.input_buffer, is_selected)
                         )
                     else:
                         UI.print(name)
@@ -513,7 +516,7 @@ class TrySelector:
         else:
             return f"{int(days / 7)}w ago"
 
-    def _handle_selection(self, try_dir: TryDir) -> None:
+    def _handle_selection(self, try_dir: dict) -> None:
         """Handle selecting an existing directory."""
         self.selected = SelectionResult(type="cd", path=try_dir["path"])
 
@@ -523,13 +526,13 @@ class TrySelector:
 
         if self.input_buffer:
             final_name = re.sub(r"\s+", "-", f"{date_prefix}-{self.input_buffer}")
-            full_path = os.path.join(self.base_path, final_name)
+            full_path = str(Path(self.base_path) / final_name)
             self.selected = SelectionResult(type="mkdir", path=full_path)
         else:
             # Prompt for name - simplified for now
             self.selected = SelectionResult(type="cancel", path="")
 
-    def _confirm_batch_delete(self, tries: list[TryDir]) -> None:
+    def _confirm_batch_delete(self, tries: list[dict]) -> None:
         """Confirm and execute batch deletion."""
         marked_items = [t for t in tries if t["path"] in self.marked_for_deletion]
         if not marked_items:
@@ -572,19 +575,19 @@ class TrySelector:
 
         if confirmation == "YES":
             try:
-                base_real = os.path.realpath(self.base_path)
+                base_real = Path(self.base_path).resolve()
                 validated = []
 
                 for item in marked_items:
-                    target_real = os.path.realpath(item["path"])
-                    if not target_real.startswith(base_real + "/"):
+                    target_real = Path(item["path"]).resolve()
+                    if not str(target_real).startswith(str(base_real) + "/"):
                         raise ValueError(
                             f"Safety check failed: {target_real} is not inside {base_real}"
                         )
-                    validated.append({"path": target_real, "basename": item["basename"]})
+                    validated.append({"path": str(target_real), "basename": item["basename"]})
 
                 self.selected = SelectionResult(
-                    type="delete", paths=validated, base_path=base_real
+                    type="delete", paths=validated, base_path=str(base_real)
                 )
                 names = ", ".join(p["basename"] for p in validated)
                 self.delete_status = f"Deleted: {{strike}}{names}{{/strike}}"
